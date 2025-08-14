@@ -20,7 +20,6 @@ flutter_export_environment.sh
 **/linux/flutter/ephemeral/
 
 # Web generated
-lib/generated_plugin_registrant.dart
 
 # IDEs
 .vscode/
