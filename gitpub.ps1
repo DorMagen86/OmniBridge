@@ -44,7 +44,12 @@ Say ("[gitpub] Pushed commit: {0}" -f $HeadSha) 'DarkGray'
 $deadline = (Get-Date).AddMinutes($TimeoutMin)
 $headers  = @{ 'User-Agent' = 'gitpub-script' }
 $apiBase  = "https://api.github.com/repos/$Owner/$Repo/actions/workflows/$WorkflowFile/runs"
-$api      = "$apiBase?branch=$Branch`&per_page=20"   # NOTE: `& (backtick ampersand)
+[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+
+$apiBase  = "https://api.github.com/repos/$Owner/$Repo/actions/workflows/$WorkflowFile/runs"
+$api      = "$apiBase?branch=$Branch" + "&per_page=20"
+
+Say ("[gitpub] API URL = {0}" -f $api) 'DarkGray'
 
 Say '[gitpub] Waiting for GitHub Actions run...' 'Gray'
 while ($true) {
