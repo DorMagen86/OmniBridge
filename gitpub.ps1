@@ -14,6 +14,9 @@ $PollSec      = 10
 
 function Say([string]$msg, [string]$color='Gray') { Write-Host -ForegroundColor $color $msg }
 
+# Ensure modern TLS
+[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+
 # Ensure git repo
 git rev-parse --is-inside-work-tree *>$null
 
@@ -40,18 +43,21 @@ git push origin $Branch | Out-Null
 $HeadSha = (git rev-parse HEAD).Trim()
 Say ("[gitpub] Pushed commit: {0}" -f $HeadSha) 'DarkGray'
 
-# Poll GitHub Actions
-$deadline = (Get-Date).AddMinutes($TimeoutMin)
-$headers  = @{ 'User-Agent' = 'gitpub-script' }
-$apiBase  = "https://api.github.com/repos/$Owner/$Repo/actions/workflows/$WorkflowFile/runs"
-[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
-
-$apiBase  = "https://api.github.com/repos/$Owner/$Repo/actions/workflows/$WorkflowFile/runs"
-$api      = "$apiBase?branch=$Branch" + "&per_page=20"
-
+# ===== Build GitHub Actions API URL robustly =====
+$apiBase = "https://api.github.com/repos/$Owner/$Repo/actions/workflows/$WorkflowFile/runs"
+$ub = [System.UriBuilder]::new($apiBase)
+$ub.Query = "branch=$Branch&per_page=20"
+$api = $ub.Uri.AbsoluteUri
 Say ("[gitpub] API URL = {0}" -f $api) 'DarkGray'
 
+$headers = @{ 'User-Agent' = 'gitpub-script' }
+# Optional token to avoid rate limits (set env var GH_TOKEN or GITHUB_TOKEN)
+if ($env:GH_TOKEN) { $headers['Authorization'] = "Bearer $env:GH_TOKEN" }
+elseif ($env:GITHUB_TOKEN) { $headers['Authorization'] = "Bearer $env:GITHUB_TOKEN" }
+
+# ===== Poll GitHub Actions =====
 Say '[gitpub] Waiting for GitHub Actions run...' 'Gray'
+$deadline = (Get-Date).AddMinutes($TimeoutMin)
 while ($true) {
     try {
         $resp = Invoke-RestMethod -Uri $api -Headers $headers -Method GET -ErrorAction Stop
@@ -79,7 +85,7 @@ while ($true) {
     Start-Sleep -Seconds $PollSec
 }
 
-# Check GitHub Pages HTTP
+# ===== Check GitHub Pages HTTP =====
 $pagesUrl = "https://$Owner.github.io/$Repo/"
 try {
     $r = Invoke-WebRequest -Uri $pagesUrl -UseBasicParsing -TimeoutSec 15
@@ -90,6 +96,6 @@ try {
         Say ("[gitpub] Site responded with status {0}" -f $r.StatusCode) 'Yellow'
     }
 } catch {
-    Say ('[gitpub] Could not reach site.') 'Red'
+    Say '[gitpub] Could not reach site.' 'Red'
     [console]::Beep(400,500); [console]::Beep(300,500)
 }
