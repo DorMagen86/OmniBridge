@@ -1,0 +1,36 @@
+# Dart / Flutter
+.dart_tool/
+.packages
+.pub-cache/
+build/
+flutter_export_environment.sh
+
+# Platform builds
+**/android/.gradle/
+**/android/local.properties
+**/android/**/build/
+**/ios/Pods/
+**/ios/Podfile.lock
+**/ios/Flutter/Flutter.podspec
+**/ios/.symlinks/
+**/ios/build/
+**/macos/Pods/
+**/macos/Flutter/ephemeral/
+**/windows/flutter/ephemeral/
+**/linux/flutter/ephemeral/
+
+# Web generated
+lib/generated_plugin_registrant.dart
+
+# IDEs
+.vscode/
+.idea/
+*.iml
+
+# Logs & misc
+*.log
+.DS_Store
+
+# Secrets (אם יש)
+*.env
+.env*
