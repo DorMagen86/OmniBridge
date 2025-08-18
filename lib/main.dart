@@ -126,6 +126,22 @@ class TrickInsight {
 
 // ======== Parser ========
 class LinParser {
+  static const List<String> _ranks = [
+    'A',
+    'K',
+    'Q',
+    'J',
+    'T',
+    '9',
+    '8',
+    '7',
+    '6',
+    '5',
+    '4',
+    '3',
+    '2'
+  ];
+
   static LinParseResult parse(String lin) {
     // names
     final pnMatch = RegExp(r"pn\|([^|]+)").firstMatch(lin);
@@ -158,6 +174,60 @@ class LinParser {
     for (int i = 0; i < tokens.length && i < 4; i++) {
       hands[order[i]] = _parseHand(tokens[i]);
     }
+
+    // --- השלמת יד/יים חסרות מתוך 52 קלפים ---
+    final seen = <String>{};
+    for (final e in hands.entries) {
+      final h = e.value;
+      for (final su in Suit.values) {
+        for (final r in h.cards[su]!) {
+          seen.add('${_suitLetter(su)}$r');
+        }
+      }
+    }
+    final missingCards = <String>[];
+    for (final c in _deck()) {
+      if (!seen.contains(c)) missingCards.add(c);
+    }
+    final missingSeats =
+        Seat.values.where((s) => !hands.containsKey(s)).toList();
+    if (missingSeats.isNotEmpty) {
+      final bySuit = {
+        Suit.spade: <String>[],
+        Suit.heart: <String>[],
+        Suit.diamond: <String>[],
+        Suit.club: <String>[],
+      };
+      for (final c in missingCards) {
+        final su = _suitFromChar(c[0])!;
+        bySuit[su]!.add(_rankToT(c.substring(1)));
+      }
+      for (final su in bySuit.keys) {
+        bySuit[su]!.sort(
+            (a, b) => rankOrder.indexOf(a).compareTo(rankOrder.indexOf(b)));
+      }
+      if (missingSeats.length == 1) {
+        hands[missingSeats.single] = Hand(
+            {for (final su in Suit.values) su: List<String>.from(bySuit[su]!)});
+      } else {
+        int idx = 0;
+        final tmp = {
+          for (final s in missingSeats)
+            s: {for (final su in Suit.values) su: <String>[]}
+        };
+        for (final su in Suit.values) {
+          for (final r in bySuit[su]!) {
+            final seat = missingSeats[idx % missingSeats.length];
+            tmp[seat]![su]!.add(r);
+            idx++;
+          }
+        }
+        for (final s in missingSeats) {
+          hands[s] = Hand({for (final su in Suit.values) su: tmp[s]![su]!});
+        }
+      }
+    }
+    // --- סוף השלמת ידיים ---
 
     // vul (optional)
     String? vul;
@@ -254,15 +324,22 @@ class LinParser {
       } else if (ch == 'C') {
         flush();
         cur = Suit.club;
-      } else if (RegExp(r'[2-9TJQKA]', caseSensitive: false).hasMatch(ch)) {
-        buf.add(ch.toUpperCase());
       } else {
-        // ignore stray chars/spaces
+        // תמיכה ב-"10" או "T"
+        if (i + 1 < s.length && ch == '1' && (s[i + 1] == '0')) {
+          buf.add('T');
+          i++; // דילוג על '0'
+        } else if (RegExp(r'[2-9TJQKA]', caseSensitive: false).hasMatch(ch)) {
+          buf.add(ch.toUpperCase());
+        } else {
+          // ignore stray chars/spaces
+        }
       }
     }
     flush();
 
     for (final su in map.keys) {
+      map[su] = map[su]!.map((r) => r == '10' ? 'T' : r).toList();
       map[su]!
           .sort((a, b) => rankOrder.indexOf(a).compareTo(rankOrder.indexOf(b)));
     }
@@ -308,6 +385,30 @@ class LinParser {
     }
     return declarer ?? dealer;
   }
+
+  // ----- Helpers for deck completion -----
+  static Iterable<String> _deck() sync* {
+    for (final s in ['S', 'H', 'D', 'C']) {
+      for (final r in _ranks) yield '$s$r';
+    }
+  }
+
+  static String _rankToT(String r) => (r == '10') ? 'T' : r;
+
+  static String _suitLetter(Suit s) => switch (s) {
+        Suit.spade => 'S',
+        Suit.heart => 'H',
+        Suit.diamond => 'D',
+        Suit.club => 'C',
+      };
+
+  static Suit? _suitFromChar(String c) => switch (c) {
+        'S' => Suit.spade,
+        'H' => Suit.heart,
+        'D' => Suit.diamond,
+        'C' => Suit.club,
+        _ => null
+      };
 }
 
 // ======== Analyzer (היוריסטיקה) ========
@@ -398,7 +499,7 @@ class Analyzer {
     final idx4N = calls.indexWhere((c) => c == '4N' || c == '4NT' || c == '4N');
     if (idx4N >= 0) {
       hints.add(
-          "4NT מזוהה כ-RKCB (1430): 5♣=1/4, 5♦=3/0, 5♥=2 ללא Q, 5♠=2 עם Q.");
+          "4NT מזוהה כ-RKCB (1430): 5♣=1/4, 5♦=3/0, 5♥=2 ללא Q של השליט, 5♠=2 עם Q.");
       final resp = getOrNull(calls, idx4N + 1);
       if (resp != null && RegExp(r"^5[SHDC]$").hasMatch(resp)) {
         final meaning = switch (resp) {
@@ -418,9 +519,11 @@ class Analyzer {
     final m = RegExp(r'^[1-7]([SHDCN])$')
         .firstMatch(LinParser._normalizeCall(data.contract));
     if (m == null) return {'note': 'חוזה לא מזוהה'};
+
     final strain = m.group(1)!;
-    if (strain == 'N')
-      return {'note': 'בחוזה NT – נתח מקורות לקיחות ועוצרים במקום LTC.'};
+    if (strain == 'N') {
+      return {'note': 'בחוזה NT נהוג להעריך מקורות לקיחות ועוצרים במקום LTC.'};
+    }
 
     final trump = _suitFromStrain(strain)!;
     final dec = data.declarer;
@@ -428,36 +531,37 @@ class Analyzer {
 
     final decHand = data.deal.hands[dec];
     final dumHand = data.deal.hands[dum];
-    if (decHand == null || dumHand == null)
+    if (decHand == null || dumHand == null) {
       return {'note': 'לא נמצאו ידיים מלאות לדקלרטור/דאמי.'};
-
-    int losersIn(Suit s) {
-      final all = [...decHand.cards[s]!, ...dumHand.cards[s]!];
-      if (all.isEmpty) return 0;
-      if (all.length == 1) return all.contains('A') ? 0 : 1;
-      if (all.length == 2) {
-        if (all.contains('A') && all.contains('K')) return 0;
-        if (all.contains('A') || all.contains('K')) return 1;
-        return 2;
-      }
-      final a = all.contains('A') ? 1 : 0;
-      final k = all.contains('K') ? 1 : 0;
-      final q = all.contains('Q') ? 1 : 0;
-      int have = a + k + q;
-      int base = 3 - have;
-      return base.clamp(0, 3);
     }
 
-    int lS = trump == Suit.spade ? 0 : losersIn(Suit.spade);
-    int lH = trump == Suit.heart ? 0 : losersIn(Suit.heart);
-    int lD = trump == Suit.diamond ? 0 : losersIn(Suit.diamond);
-    int lC = trump == Suit.club ? 0 : losersIn(Suit.club);
+    int losersHand(Hand h, Suit s) {
+      final r = h.cards[s] ?? const <String>[];
+      // מכובדים A/K/Q מפחיתים עד 3 מפסידים אפשריים
+      int cnt = 3;
+      if (r.contains('A')) cnt--;
+      if (r.contains('K')) cnt--;
+      if (r.contains('Q')) cnt--;
+      final len = r.length.clamp(0, 3);
+      return cnt.clamp(0, len);
+    }
+
+    final lDec = {for (final s in Suit.values) s: losersHand(decHand, s)};
+    final lDum = {for (final s in Suit.values) s: losersHand(dumHand, s)};
+
+    int total = 0;
+    final perSuit = <String, int>{};
+    for (final s in Suit.values) {
+      final sum = lDec[s]! + lDum[s]!;
+      perSuit[s.sym] = sum;
+      total += sum;
+    }
 
     return {
       'trump': trump.sym,
-      'estimated_losers': lS + lH + lD + lC,
-      'by_suit': {'♠': lS, '♥': lH, '♦': lD, '♣': lC},
-      'note': 'אומדן LTC גס (לא Double Dummy).',
+      'estimated_losers': total,
+      'by_suit': perSuit,
+      'note': 'LTC קלאסי (אומדן; ללא התאמות קיצור/רפים).',
     };
   }
 
@@ -475,8 +579,8 @@ class Analyzer {
     } else {
       tips.add(
           'בשליט: בדוק פיצול טראמפ מוקדם (לקיחה עליונה אחת) לפני משיכה מלאה.');
-      tips.add('חפש רַפְּל בסדרה קצרה אצלך כדי לצמצם מפסידים.');
-      tips.add('שמור כניסות לדאמי/יד כדי לבצע פינסים/רַפְּלים/השלכות.');
+      tips.add('חפש רַף בסדרה קצרה אצלך כדי לצמצם מפסידים.');
+      tips.add('שמור כניסות לדאמי/יד כדי לבצע פינסים/רַפים/השלכות.');
     }
     if (data.openingLead.isNotEmpty) {
       tips.add(
@@ -520,7 +624,7 @@ class Analyzer {
       final leadCard = trick.isNotEmpty ? trick[0] : '';
       final leadSuitChar =
           leadCard.isNotEmpty ? leadCard[0].toUpperCase() : 'X';
-      final leadSuit = _suitFromChar(leadSuitChar);
+      final leadSuit = LinParser._suitFromChar(leadSuitChar);
 
       Seat? winner;
       String? winningCard;
@@ -540,18 +644,19 @@ class Analyzer {
 
         final sChar = cardRaw[0].toUpperCase();
         final r = _cardRank(cardRaw);
-        final suit = _suitFromChar(sChar);
+        final suit = LinParser._suitFromChar(sChar);
         playsBySeat[seat] = "$sChar$r";
 
         // עקיבת קלפים/חובת הליכה
         if (i > 0 && leadSuit != null && suit != leadSuit) {
           final hadLead = (rem[seat]![leadSuit] ?? const <String>[]).isNotEmpty;
-          if (hadLead)
+          if (hadLead) {
             notes.add(
                 "${seat.heb}: נראה שלא עקב בסדרה מובלת למרות שהיה צבע – חשד ל-revoke.");
+          }
         }
 
-        // זיהוי רף של ההגנה
+        // זיהוי רַף של ההגנה
         if (i > 0 &&
             leadSuit != null &&
             trump != null &&
@@ -568,11 +673,12 @@ class Analyzer {
           if (_isHonor(r) && leadIsLow) {
             final thirdCard = (trick.length >= 3) ? trick[2] : '';
             if (thirdCard.isNotEmpty) {
-              final thirdSuit = _suitFromChar(thirdCard[0].toUpperCase());
+              final thirdSuit =
+                  LinParser._suitFromChar(thirdCard[0].toUpperCase());
               final thirdRank = _cardRank(thirdCard);
               if (thirdSuit == leadSuit && _rankHigher(thirdRank, r)) {
                 notes.add(
-                    "${seat.heb}: כלל 'Second hand low' – עדיף לשמור כבוד; שלישי בכל מקרה כיסה בכבוד גבוה יותר.");
+                    "${seat.heb}: כלל 'Second hand low' – עדיף לשמור מכובד; שלישי ממילא כיסה במכובד גבוה יותר.");
               }
             }
           }
@@ -586,7 +692,7 @@ class Analyzer {
                 .any((x) => _isHigherHonor(x, _cardRank(leadCard)));
             if (oppHasHigher && !_isHonor(r)) {
               notes.add(
-                  "${seat.heb}: לא כיסה כבוד של דאמי – לעיתים כדאי לכסות כדי למנוע הקמת הסדרה.");
+                  "${seat.heb}: לא כיסה מכובד של דאמי – לעיתים כדאי לכסות כדי למנוע הקמת הסדרה.");
             }
           }
         }
@@ -604,7 +710,7 @@ class Analyzer {
                 dummyHadMiddleHonor &&
                 (played == 'A' || played == 'K')) {
               notes.add(
-                  "דאמי: ייתכן שהוחמצה פינס לכיוון ${leadSuit.sym}. במקום לעלות ב-$played, עדיף לבדוק Q/J אם הכבוד אצל RHO.");
+                  "דאמי: ייתכן שהוחמצה פינס לכיוון ${leadSuit.sym}. במקום לעלות ב-$played, עדיף לבדוק Q/J אם המכובד אצל RHO.");
             }
           }
         }
@@ -615,7 +721,7 @@ class Analyzer {
             winner = seat;
             winningCard = "$sChar$r";
           } else {
-            final winCardSuit = _suitFromChar(winningCard![0]);
+            final winCardSuit = LinParser._suitFromChar(winningCard![0]);
             final winCardRank = _cardRank(winningCard);
             final beats =
                 _beatsCurrent(suit, r, winCardSuit!, winCardRank, trump);
@@ -639,11 +745,11 @@ class Analyzer {
 
         if (t == 2 && trumpsLedByDecl == 0) {
           notes.add(
-              "דקלרטור: טרם משכת שליטים בשלוש הלקיחות הראשונות. אם אין צורך דחוף ברפים/השלכות – עדיף למשוך שליטים מוקדם.");
+              "דקלרטור: טרם משכת שליטים בשלוש הלקיחות הראשונות. אם אין צורך דחוף ברַפים/השלכות – עדיף למשוך מוקדם.");
         }
         if (anyDefenderRuff && t <= 3) {
           notes.add(
-              "ההגנה ביצעה רף מוקדם. משיכת שליטים מוקדמת הייתה יכולה לצמצם רפים כאלה.");
+              "ההגנה ביצעה רַף מוקדם. משיכת שליטים מוקדמת הייתה יכולה לצמצם רַפים כאלה.");
         }
       }
 
@@ -657,6 +763,46 @@ class Analyzer {
       ));
 
       leader = win; // המנצח מוביל לטריק הבא
+    }
+
+    // --- תכנון סדר משחק (הערות כלליות לדקלרטור) ---
+    final planningNotes = <String>[];
+    if (trump != null) {
+      if (trumpsLedByDecl == 0 && data.play.tricks.length >= 3) {
+        planningNotes.add(
+            "דקלרטור: משיכת שליטים מאוחרת יחסית – שקול למשוך מוקדם אם אין צורך דחוף ברַפים/השלכות.");
+      }
+      if (anyDefenderRuff &&
+          trumpsLedByDecl >= 2 &&
+          data.play.tricks.length >= 4) {
+        planningNotes.add(
+            "דקלרטור: משיכת שליטים מוקדמת ייתכן ופגעה ביכולת לבצע רַפים בצד הקצר.");
+      }
+    } else {
+      // NT
+      if (data.play.tricks.isNotEmpty) {
+        final firstTrick = data.play.tricks.first.cards;
+        bool wonHigh = firstTrick.any((c) {
+          final r = _cardRank(c);
+          return (r == 'A' || r == 'K');
+        });
+        if (wonHigh) {
+          planningNotes.add(
+              "NT: ייתכן שהוחמצה עיכוב (hold-up) בלקיחה הראשונה כדי לנתק תקשורת בהגנה.");
+        }
+      }
+    }
+    if (planningNotes.isNotEmpty) {
+      insights.insert(
+        0,
+        TrickInsight(
+          trickNumber: 0,
+          leader: data.declarer,
+          winner: data.declarer,
+          playsBySeat: const {},
+          notes: planningNotes,
+        ),
+      );
     }
 
     return insights;
@@ -724,14 +870,6 @@ class Analyzer {
         Seat.west => Seat.east
       };
 
-  Suit? _suitFromChar(String c) => switch (c) {
-        'S' => Suit.spade,
-        'H' => Suit.heart,
-        'D' => Suit.diamond,
-        'C' => Suit.club,
-        _ => null
-      };
-
   String _cardRank(String pc) {
     final raw = pc.substring(1).toUpperCase();
     if (raw == '10') return 'T';
@@ -779,10 +917,10 @@ enum MistakeType {
   openingLead, // הובלת פתיחה לא טובה
   revokeSuspect, // חשד ל-revoke
   secondHandLow, // Second hand low שהופרה
-  missedCoverHonor, // לא כיסה כבוד
+  missedCoverHonor, // לא כיסה מכובד
   missedFinesse, // החמצת פינס
   lateTrump, // איחור במשיכת שליטים
-  defenderRuff, // רף מוקדם של ההגנה
+  defenderRuff, // רַף מוקדם של ההגנה
   other, // אחר
 }
 
@@ -840,6 +978,8 @@ class _AnalyzerScreenState extends State<AnalyzerScreen> {
 
   bool _loading = false;
 
+  String? _fileName; // שם הקובץ המנותח
+
   // ---- פילטרים: פעולות ----
   void _toggleType(MistakeType t) {
     setState(() {
@@ -862,10 +1002,10 @@ class _AnalyzerScreenState extends State<AnalyzerScreen> {
         MistakeType.openingLead => 'הובלת פתיחה',
         MistakeType.revokeSuspect => 'חשד ל־Revoke',
         MistakeType.secondHandLow => 'Second hand low',
-        MistakeType.missedCoverHonor => 'לא כיסה כבוד',
+        MistakeType.missedCoverHonor => 'לא כיסה מכובד',
         MistakeType.missedFinesse => 'הוחמצה פינס',
         MistakeType.lateTrump => 'איחור משיכת שליטים',
-        MistakeType.defenderRuff => 'רף מוקדם בהגנה',
+        MistakeType.defenderRuff => 'רַף מוקדם בהגנה',
         MistakeType.other => 'אחר',
       };
 
@@ -873,10 +1013,10 @@ class _AnalyzerScreenState extends State<AnalyzerScreen> {
     final s = n.toLowerCase();
     if (s.contains('revoke')) return MistakeType.revokeSuspect;
     if (s.contains('second hand low')) return MistakeType.secondHandLow;
-    if (s.contains('לא כיסה כבוד')) return MistakeType.missedCoverHonor;
+    if (s.contains('לא כיסה מכובד')) return MistakeType.missedCoverHonor;
     if (s.contains('הוחמצה פינס')) return MistakeType.missedFinesse;
     if (s.contains('טרם משכת שליטים')) return MistakeType.lateTrump;
-    if (s.contains('רף מוקדם')) return MistakeType.defenderRuff;
+    if (s.contains('רַף מוקדם')) return MistakeType.defenderRuff;
     if (s.contains('הובלה')) return MistakeType.openingLead;
     return MistakeType.other;
   }
@@ -921,8 +1061,9 @@ class _AnalyzerScreenState extends State<AnalyzerScreen> {
         Seat? target = _seatFromNotePrefix(note, declarer);
 
         // Opening lead -> למוביל של אותו טריק
-        if (target == null && t == MistakeType.openingLead)
+        if (target == null && t == MistakeType.openingLead) {
           target = step.leader;
+        }
 
         // Defender ruff -> לשני המגינים
         if (target == null && t == MistakeType.defenderRuff) {
@@ -1007,6 +1148,7 @@ class _AnalyzerScreenState extends State<AnalyzerScreen> {
       }
 
       final file = res.files.single;
+      _fileName = file.name; // שם הקובץ לתצוגה
       final bytes = file.bytes;
       if (bytes == null) {
         throw StateError(
@@ -1014,8 +1156,9 @@ class _AnalyzerScreenState extends State<AnalyzerScreen> {
       }
 
       final content = String.fromCharCodes(bytes);
-      if (!content.contains('md|'))
+      if (!content.contains('md|')) {
         throw FormatException('קובץ LIN לא תקין: חסר md| (חלוקת ידיים).');
+      }
 
       final parsed = LinParser.parse(content);
       final analyzer = Analyzer(parsed);
@@ -1043,7 +1186,20 @@ class _AnalyzerScreenState extends State<AnalyzerScreen> {
     return Directionality(
       textDirection: TextDirection.rtl,
       child: Scaffold(
-        appBar: AppBar(title: const Text('ניתוח משחק ברידג׳ מקובץ LIN')),
+        appBar: AppBar(
+          title: const Text('ניתוח משחק ברידג׳ מקובץ LIN'),
+          bottom: PreferredSize(
+            preferredSize: const Size.fromHeight(24),
+            child: Padding(
+              padding: const EdgeInsets.only(bottom: 8),
+              child: Text(
+                _fileName == null ? '' : 'קובץ: ${_fileName!}',
+                style: const TextStyle(fontSize: 12, color: Colors.black54),
+                textAlign: TextAlign.center,
+              ),
+            ),
+          ),
+        ),
         floatingActionButton: FloatingActionButton.extended(
           onPressed: _loading ? null : _pickAndAnalyze,
           icon: _loading
@@ -1073,7 +1229,7 @@ class _AnalyzerScreenState extends State<AnalyzerScreen> {
         ),
       );
 
-  // ---------- Auction rows aligned to dealer ----------
+  // ---------- Auction rows aligned to dealer + הסבר לכל הכרזה ----------
   List<DataRow> _buildAuctionRows() {
     if (data == null) return [];
     final calls = data!.auction.calls.map(LinParser._normalizeCall).toList();
@@ -1099,15 +1255,80 @@ class _AnalyzerScreenState extends State<AnalyzerScreen> {
       grid[r][c] = _prettyCall(calls[i]);
     }
 
+    final lastIdx = calls.isEmpty ? -1 : calls.length - 1;
+    final lastPretty = lastIdx >= 0 ? _prettyCall(calls[lastIdx]) : '';
+
+    List<DataRow> rows = [];
+    for (final row in grid) {
+      rows.add(DataRow(cells: [
+        for (int c = 0; c < 4; c++)
+          DataCell(Container(
+            padding: const EdgeInsets.symmetric(vertical: 6),
+            decoration: BoxDecoration(
+              color: (row[c].isNotEmpty && row[c] == lastPretty)
+                  ? Colors.teal.withValues(alpha: 0.10)
+                  : null,
+              borderRadius: BorderRadius.circular(6),
+            ),
+            child: Tooltip(
+              message: _explainCallSimple(row[c], calls),
+              child: Text(row[c]),
+            ),
+          )),
+      ]));
+    }
+    return rows;
+  }
+
+  List<DataColumn> _auctionHeader() {
+    final dealer = data!.deal.dealer;
+    final headerLabels = const {
+      Seat.west: 'מערב',
+      Seat.north: 'צפון',
+      Seat.east: 'מזרח',
+      Seat.south: 'דרום',
+    };
     return [
-      for (final row in grid)
-        DataRow(cells: [
-          DataCell(Text(row[0])), // מערב
-          DataCell(Text(row[1])), // צפון
-          DataCell(Text(row[2])), // מזרח
-          DataCell(Text(row[3])), // דרום
-        ])
+      for (final s in [Seat.west, Seat.north, Seat.east, Seat.south])
+        DataColumn(
+          label: Row(
+            children: [
+              Text(headerLabels[s]!),
+              if (s == dealer) const SizedBox(width: 6),
+              if (s == dealer)
+                const Icon(Icons.circle, size: 8, color: Colors.teal),
+            ],
+          ),
+        ),
     ];
+  }
+
+  String _explainCallSimple(String call, List<String> context) {
+    final c = LinParser._normalizeCall(call);
+    if (c.isEmpty) return '';
+    if (c == 'P') return 'פס – ללא הצעה.';
+    if (c == 'X' || c == 'D')
+      return 'כפול – לרוב Takeout בשלבים מוקדמים או ענישתי בהמשך.';
+    if (c == 'XX' || c == 'R') return 'כפול-כפול – לרוב להעניש/להוסיף מחויבות.';
+    final m = RegExp(r'^([1-7])([SHDCN])$').firstMatch(c);
+    if (m != null) {
+      final lvl = m.group(1)!;
+      final s = m.group(2)!;
+      final strain = switch (s) {
+        'S' => '♠',
+        'H' => '♥',
+        'D' => '♦',
+        'C' => '♣',
+        'N' => 'NT',
+        _ => s
+      };
+      if (s == 'N') {
+        return '$lvl$strain – הצעה טבעית (יד מאוזנת). טווח שכיח: 1NT≈15–17; 2NT≈20–22 (תלוי שיטה).';
+      } else {
+        return '$lvl$strain – הצעה טבעית/תחרותית בסדרת $strain, לרוב 5+ קלפים (תלוי שיטה).';
+      }
+    }
+    return 'הכרזה מיוחדת/מוסכמות – המשמעות תלויה בשיטה.';
   }
 
   String _prettyCall(String raw) {
@@ -1130,7 +1351,22 @@ class _AnalyzerScreenState extends State<AnalyzerScreen> {
 
   Widget _report() {
     final d = data!;
-    Widget handCard(String title, Hand? h) {
+    Widget chipWithTooltip(String text) => Tooltip(
+          message: text,
+          child: ConstrainedBox(
+            constraints: const BoxConstraints(maxWidth: 220),
+            child: Chip(
+              label: Text(
+                text,
+                overflow: TextOverflow.ellipsis,
+                maxLines: 1,
+              ),
+            ),
+          ),
+        );
+
+    Widget handCard(String title, Seat seat, Hand? h) {
+      final isDealer = seat == d.deal.dealer;
       return Card(
         elevation: 0.5,
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
@@ -1141,8 +1377,16 @@ class _AnalyzerScreenState extends State<AnalyzerScreen> {
               : Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    Text(title,
-                        style: const TextStyle(fontWeight: FontWeight.bold)),
+                    Row(
+                      children: [
+                        Text(title,
+                            style:
+                                const TextStyle(fontWeight: FontWeight.bold)),
+                        if (isDealer) const SizedBox(width: 6),
+                        if (isDealer)
+                          const Icon(Icons.circle, size: 8, color: Colors.teal),
+                      ],
+                    ),
                     const SizedBox(height: 6),
                     Text(h.fmtLine(Suit.spade)),
                     Text(h.fmtLine(Suit.heart)),
@@ -1166,59 +1410,90 @@ class _AnalyzerScreenState extends State<AnalyzerScreen> {
     // הכרזות – מיושר לדילר
     final auctionRows = _buildAuctionRows();
 
-    // טריקים פשוט (Lead/2nd/3rd/4th)
+    // טריקים עם הצגת מושב ליד כל קלף
     List<DataRow> trickRows = [];
+    Seat leader = LinParser._next(d.declarer);
     for (int t = 0; t < d.play.tricks.length; t++) {
       final trick = d.play.tricks[t].cards;
+      final order = [
+        leader,
+        LinParser._next(leader),
+        LinParser._next(LinParser._next(leader)),
+        LinParser._next(LinParser._next(LinParser._next(leader))),
+      ];
       trickRows.add(DataRow(cells: [
-        DataCell(Text(getOrNull(trick, 0) ?? '')),
-        DataCell(Text(getOrNull(trick, 1) ?? '')),
-        DataCell(Text(getOrNull(trick, 2) ?? '')),
-        DataCell(Text(getOrNull(trick, 3) ?? '')),
+        for (int i = 0; i < 4; i++)
+          DataCell(Row(
+            children: [
+              Container(
+                padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                margin: const EdgeInsets.only(right: 6),
+                decoration: BoxDecoration(
+                  color: Colors.black.withValues(alpha: 0.06),
+                  borderRadius: BorderRadius.circular(6),
+                ),
+                child: Text(order[i].heb, style: const TextStyle(fontSize: 12)),
+              ),
+              Text(getOrNull(trick, i) ?? ''),
+            ],
+          )),
       ]));
+
+      final insight = steps?.firstWhere(
+        (s) => s.trickNumber == t + 1,
+        orElse: () => TrickInsight(
+          trickNumber: t + 1,
+          leader: leader,
+          winner: leader,
+          playsBySeat: const {},
+          notes: const [],
+        ),
+      );
+      leader = insight?.winner ?? leader;
     }
+
+    final w = MediaQuery.of(context).size.width;
+    final cols = w >= 1100 ? 4 : (w >= 700 ? 2 : 1);
 
     return ListView(
       padding: const EdgeInsets.all(12),
       children: [
         Wrap(spacing: 10, runSpacing: 10, children: [
-          Chip(label: Text("חוזה: ${_prettyCall(d.contract)}")),
-          Chip(label: Text("דקלרטור: ${d.declarer.heb}")),
-          Chip(label: Text("הובלה: ${_prettyCard(d.openingLead)}")),
+          chipWithTooltip("חוזה: ${_prettyCall(d.contract)}"),
+          chipWithTooltip("דקלרטור: ${d.declarer.heb}"),
+          chipWithTooltip("הובלה: ${_prettyCard(d.openingLead)}"),
           if (d.deal.vul != null)
-            Chip(label: Text("פגיעות: ${_vulHeb(d.deal.vul)}")),
+            chipWithTooltip("פגיעות: ${_vulHeb(d.deal.vul)}"),
         ]),
         section('שחקנים'),
         Wrap(spacing: 10, runSpacing: 10, children: [
-          Chip(label: Text("צפון: ${d.playerNames[Seat.north] ?? '—'}")),
-          Chip(label: Text("מזרח: ${d.playerNames[Seat.east] ?? '—'}")),
-          Chip(label: Text("דרום: ${d.playerNames[Seat.south] ?? '—'}")),
-          Chip(label: Text("מערב: ${d.playerNames[Seat.west] ?? '—'}")),
+          chipWithTooltip("צפון: ${d.playerNames[Seat.north] ?? '—'}"),
+          chipWithTooltip("מזרח: ${d.playerNames[Seat.east] ?? '—'}"),
+          chipWithTooltip("דרום: ${d.playerNames[Seat.south] ?? '—'}"),
+          chipWithTooltip("מערב: ${d.playerNames[Seat.west] ?? '—'}"),
         ]),
         section('ידיים'),
         GridView.count(
-          crossAxisCount: MediaQuery.of(context).size.width > 900 ? 4 : 2,
+          crossAxisCount: cols,
           shrinkWrap: true,
           physics: const NeverScrollableScrollPhysics(),
           children: [
-            handCard('צפון', d.deal.hands[Seat.north]),
-            handCard('מזרח', d.deal.hands[Seat.east]),
-            handCard('דרום', d.deal.hands[Seat.south]),
-            handCard('מערב', d.deal.hands[Seat.west]),
+            handCard('צפון', Seat.north, d.deal.hands[Seat.north]),
+            handCard('מזרח', Seat.east, d.deal.hands[Seat.east]),
+            handCard('דרום', Seat.south, d.deal.hands[Seat.south]),
+            handCard('מערב', Seat.west, d.deal.hands[Seat.west]),
           ],
         ),
         section('הכרזות (מיושר לדילר: מערב / צפון / מזרח / דרום)'),
         Card(
           shape:
               RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-          child: DataTable(
-            columns: const [
-              DataColumn(label: Text('מערב')),
-              DataColumn(label: Text('צפון')),
-              DataColumn(label: Text('מזרח')),
-              DataColumn(label: Text('דרום')),
-            ],
-            rows: auctionRows,
+          child: Directionality(
+            textDirection: TextDirection.ltr, // מונע החלפת מושבים ב-RTL
+            child: DataTable(
+              columns: _auctionHeader(),
+              rows: auctionRows,
+            ),
           ),
         ),
         if (d.play.tricks.isNotEmpty) ...[
@@ -1226,14 +1501,17 @@ class _AnalyzerScreenState extends State<AnalyzerScreen> {
           Card(
             shape:
                 RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-            child: DataTable(
-              columns: const [
-                DataColumn(label: Text('Lead')),
-                DataColumn(label: Text('2nd')),
-                DataColumn(label: Text('3rd')),
-                DataColumn(label: Text('4th')),
-              ],
-              rows: trickRows,
+            child: Directionality(
+              textDirection: TextDirection.ltr, // מונע החלפת מושבים ב-RTL
+              child: DataTable(
+                columns: const [
+                  DataColumn(label: Text('Lead')),
+                  DataColumn(label: Text('2nd')),
+                  DataColumn(label: Text('3rd')),
+                  DataColumn(label: Text('4th')),
+                ],
+                rows: trickRows,
+              ),
             ),
           ),
         ],
@@ -1264,19 +1542,25 @@ class _AnalyzerScreenState extends State<AnalyzerScreen> {
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
-                      Text(
-                          "טריק ${s.trickNumber} • מוביל: ${s.leader.heb} • זכה: ${s.winner.heb}",
-                          style: const TextStyle(fontWeight: FontWeight.w600)),
+                      if (s.trickNumber == 0)
+                        const Text("סיכום תכנון הכרוז",
+                            style: TextStyle(fontWeight: FontWeight.w600))
+                      else
+                        Text(
+                            "טריק ${s.trickNumber} • מוביל: ${s.leader.heb} • זכה: ${s.winner.heb}",
+                            style:
+                                const TextStyle(fontWeight: FontWeight.w600)),
                       const SizedBox(height: 6),
-                      Wrap(spacing: 8, runSpacing: 8, children: [
-                        for (final entry in s.playsBySeat.entries)
-                          Chip(
-                              label: Text(
-                                  "${entry.key.heb}: ${_prettyCard(entry.value)}")),
-                      ]),
+                      if (s.playsBySeat.isNotEmpty)
+                        Wrap(spacing: 8, runSpacing: 8, children: [
+                          for (final entry in s.playsBySeat.entries)
+                            Chip(
+                                label: Text(
+                                    "${entry.key.heb}: ${_prettyCard(entry.value)}")),
+                        ]),
                       const SizedBox(height: 8),
                       if (s.notes.isEmpty)
-                        _bullet("— לא זוהו טעויות ברורות בטריק זה —")
+                        _bullet("— לא זוהו טעויות ברורות —")
                       else
                         ...s.notes.map(_bullet),
                     ],
@@ -1320,8 +1604,11 @@ class _AnalyzerScreenState extends State<AnalyzerScreen> {
   }
 
   // ===== Heatmap UI =====
-  Color _heatColor(double x) =>
-      Color.lerp(Colors.white, Colors.red, x) ?? Colors.red;
+  Color _heatColor(double x) {
+    // מדרג לבן→ורוד→אדום לנראות טובה
+    final mid = Color.lerp(Colors.white, Colors.pink, x.clamp(0, 0.6))!;
+    return Color.lerp(mid, Colors.red, (x - 0.6).clamp(0, 0.4) / 0.4)!;
+  }
 
   Widget _legendHeatmap() {
     return Row(
@@ -1470,9 +1757,17 @@ class _AnalyzerScreenState extends State<AnalyzerScreen> {
             Container(
               alignment: Alignment.center,
               padding: const EdgeInsets.symmetric(vertical: 8),
-              color: _heatColor(norm),
-              child: Text('$v',
-                  style: const TextStyle(fontWeight: FontWeight.w600)),
+              decoration: BoxDecoration(
+                color: _heatColor(norm),
+                border: Border.all(color: Colors.black12),
+              ),
+              child: Text(
+                '$v',
+                style: TextStyle(
+                  fontWeight: FontWeight.w600,
+                  color: (norm > 0.55) ? Colors.white : Colors.black87,
+                ),
+              ),
             ),
             if (isTop)
               const Positioned(
